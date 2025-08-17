@@ -1,14 +1,10 @@
 import numpy as np
 import cv2
-from nutrition.nutrition_extractor.detection import Detector
-from flask import request, jsonify
 from flask import Flask, request, jsonify
 from roast_engine import RoastEngine
 import io
 import re
-import cv2
 import json
-import numpy as np
 import pytesseract
 import requests
 import os
@@ -445,13 +441,7 @@ def normalize_for_roast(food):
     }
 
 
-# === Nutrition Detection Retrofit ===
-
-MODEL_PATH = "dungeon_web/nutrition/frozen_inference_graph.pb"
-LABEL_PATH = "dungeon_web/nutrition/nutrition.pbtxt"
-
-detector = Detector(MODEL_PATH, LABEL_PATH)
-
+# === Simple object detection wrapper ===
 
 @app.route("/detect", methods=["POST"])
 def detect():
@@ -459,13 +449,32 @@ def detect():
     if not file:
         return jsonify({"error": "No image uploaded"}), 400
     img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
-    boxes, scores, classes = detector.detect(img)
-    return jsonify({
-        "boxes": boxes.tolist(),
-        "scores": scores.tolist(),
-        "classes": classes.tolist()
-    })
-# === End Retrofit ===
+
+    detections = []
+
+    bc = detect_barcode(img)
+    if bc:
+        x, y, w, h = bc["bbox"]
+        detections.append({"bbox": [x, y, x + w, y + h],
+                           "score": bc.get("conf", 0.0),
+                           "class": "barcode"})
+
+    lb = None
+    try:
+        lb = detect_nutrition_label(img)
+    except Exception:
+        lb = None
+    if lb:
+        x, y, w, h = lb["bbox"]
+        detections.append({"bbox": [x, y, x + w, y + h],
+                           "score": lb.get("conf", 0.0),
+                           "class": "label"})
+
+    boxes = [d["bbox"] for d in detections]
+    scores = [d["score"] for d in detections]
+    classes = [d["class"] for d in detections]
+    return jsonify({"boxes": boxes, "scores": scores, "classes": classes})
+# === End object detection wrapper ===
 
 
 if __name__ == "__main__":
