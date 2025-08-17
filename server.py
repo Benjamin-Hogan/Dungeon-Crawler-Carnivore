@@ -1,18 +1,37 @@
 from flask import Flask, request, jsonify
 from roast_engine import RoastEngine
-import io, re, os, cv2, json, numpy as np, pytesseract, requests
+import io, re, cv2, json, numpy as np, pytesseract, requests
 from PIL import Image
 from pyzbar.pyzbar import decode as zbar_decode
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
-# preload detectors: OpenCV barcode and EAST text model for nutrition labels
+# preload barcode detector (nutrition label detection uses contour heuristics)
 barcode_detector = cv2.barcode_BarcodeDetector()
-east_path = os.path.join(os.path.dirname(__file__), "models", "frozen_east_text_detection.pb")
-text_detector = cv2.dnn_TextDetectionModel(east_path)
-text_detector.setConfidenceThreshold(0.5)
-text_detector.setNMSThreshold(0.4)
-text_detector.setInputParams(scale=1.0, size=(320, 320), mean=(123.68, 116.78, 103.94), swapRB=True, crop=False)
+
+
+def detect_nutrition_label(bgr):
+    """Return bounding box [x,y,w,h] of a likely nutrition label or None."""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    # high contrast text blocks -> white, background -> black
+    thresh = cv2.adaptiveThreshold(
+        blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 4
+    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+    cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    h, w = gray.shape[:2]
+    candidates = []
+    for c in cnts:
+        x, y, cw, ch = cv2.boundingRect(c)
+        area = cw * ch
+        aspect = ch / float(cw + 1e-5)
+        if area > 0.02 * h * w and area < 0.9 * h * w and 1.0 < aspect < 6.0:
+            candidates.append((area, (x, y, cw, ch)))
+    if candidates:
+        return max(candidates, key=lambda t: t[0])[1]
+    return None
 
 # ---------- ROUTES ----------
 
@@ -58,10 +77,9 @@ def detect_frame():
 
     label = None
     try:
-        boxes, confs = text_detector.detect(bgr)
-        if len(boxes):
-            rects = [cv2.boundingRect(b.astype(np.int32)) for b in boxes]
-            x, y, lw, lh = max(rects, key=lambda r: r[2] * r[3])
+        lb = detect_nutrition_label(bgr)
+        if lb:
+            x, y, lw, lh = lb
             label = {"bbox": [int(x), int(y), int(lw), int(lh)]}
     except Exception:
         pass
