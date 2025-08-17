@@ -12,6 +12,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Fetch nutrition detection model
+RUN curl -L -o dungeon_web/nutrition/frozen_inference_graph.pb \
+    https://raw.githubusercontent.com/openfoodfacts/open-nutrition-table-extractor/master/data/frozen_inference_graph.pb
+
+
 COPY . .
 EXPOSE 6969
 CMD ["python", "server.py"]

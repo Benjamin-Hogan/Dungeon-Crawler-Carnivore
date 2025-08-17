@@ -5,3 +5,10 @@ numpy
 pyzbar
 pytesseract
 Pillow
+Flask==3.0.0
+requests
+opencv-python-headless
+numpy
+pyzbar
+pytesseract
+Pillow
