@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Dungeon Nutrition Crawl</title>
+    <link rel="stylesheet" href="style.css" />
+    <!-- OpenCV.js (browser-side CV) -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+    <!-- ZXing (barcode, returns points) -->
+    <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>Dungeon Nutrition Crawl</h1>
+        <p class="muted">
+          Point camera at a barcode or a Nutrition Facts panel. Boxes will
+          appear automatically.
+        </p>
+      </header>
+
+      <section class="controls">
+        <div class="left">
+          <label>Camera</label>
+          <select id="cameraSel"></select>
+          <button id="startBtn">Start</button>
+          <button id="stopBtn" disabled>Stop</button>
+          <button id="captureBtn" disabled>Capture ROI</button>
+        </div>
+        <div class="right">
+          <input id="upcManual" placeholder="Enter UPC manually" />
+          <button id="upcBtn">Roast</button>
+          <label class="chk"
+            ><input type="checkbox" id="voiceChk" /> Voice</label
+          >
+        </div>
+      </section>
+
+      <section class="stage">
+        <video id="video" playsinline></video>
+        <canvas id="overlay"></canvas>
+        <div id="status">Idle.</div>
+      </section>
+
+      <section class="result">
+        <h2>Result</h2>
+        <div id="meta"></div>
+        <div id="roast"></div>
+        <pre id="nutri"></pre>
+      </section>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
