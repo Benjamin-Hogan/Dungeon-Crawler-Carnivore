@@ -27,6 +27,48 @@ def roast_by_upc():
     food["roast"] = roast
     return jsonify(food)
 
+# Client sends a full video frame; we detect barcode + nutrition label
+@app.route("/api/detect", methods=["POST"])
+def detect_frame():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file"}), 400
+    pil = Image.open(io.BytesIO(f.read())).convert("RGB")
+    bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+    h, w = bgr.shape[:2]
+    barcode = None
+    try:
+        bd = cv2.barcode_BarcodeDetector()
+        ok, decoded, _, pts = bd.detectAndDecode(bgr)
+        if ok and pts is not None and len(pts):
+            pts = pts[0].reshape(-1, 2)
+            x, y, bw, bh = cv2.boundingRect(pts.astype(np.float32))
+            code = re.sub(r"\D", "", decoded[0] if decoded else "")
+            barcode = {"bbox": [int(x), int(y), int(bw), int(bh)], "upc": code or None}
+    except Exception:
+        pass
+
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+    thr = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    closed = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (15, 9)))
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    label = None
+    best_score = 0.0
+    for c in contours:
+        x, y, lw, lh = cv2.boundingRect(c)
+        area = lw * lh
+        if area < 0.06 * w * h:
+            continue
+        ar = lw / (lh + 1e-6)
+        score = (area / (w * h)) * (1.0 if 0.35 < ar < 1.8 else 0.6)
+        if score > best_score:
+            best_score = score
+            label = {"bbox": [int(x), int(y), int(lw), int(lh)]}
+
+    return jsonify({"barcode": barcode, "label": label})
+
 # Browser uploads a cropped ROI (label or barcode frame)
 @app.route("/api/analyze", methods=["POST"])
 def analyze_roi():

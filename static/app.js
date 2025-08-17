@@ -16,21 +16,16 @@ const nutriEl = document.getElementById("nutri");
 
 let stream = null;
 let running = false;
-let lastFrameAt = 0;
 let bestLabelBox = null;
 let bestBarcodeBox = null;
 let currentUPC = null;
-let zxingReader = null;
-let zxingActive = false;
 
 // Populate cameras
 (async () => {
   const devices = await navigator.mediaDevices.enumerateDevices();
   const cams = devices.filter((d) => d.kind === "videoinput");
   cameraSel.innerHTML = cams
-    .map(
-      (c) => `<option value="${c.deviceId}">${c.label || c.deviceId}</option>`
-    )
+    .map((c) => `<option value="${c.deviceId}">${c.label || c.deviceId}</option>`)
     .join("");
   if (!cams.length) statusEl.textContent = "No cameras found.";
 })();
@@ -54,8 +49,8 @@ startBtn.addEventListener("click", async () => {
     stopBtn.disabled = false;
     captureBtn.disabled = false;
     statusEl.textContent = "Scanning…";
-    startZxing(); // barcode
-    requestAnimationFrame(loop); // label
+    detectLoop();
+    requestAnimationFrame(drawLoop);
   } catch (e) {
     console.error(e);
     statusEl.textContent = "Failed to start camera.";
@@ -65,7 +60,6 @@ startBtn.addEventListener("click", async () => {
 // Stop
 stopBtn.addEventListener("click", () => {
   running = false;
-  if (zxingActive) stopZxing();
   if (stream) stream.getTracks().forEach((t) => t.stop());
   bestLabelBox = bestBarcodeBox = null;
   currentUPC = null;
@@ -106,118 +100,38 @@ captureBtn.addEventListener("click", async () => {
 
 // ------------- Real-time processing -------------
 
-// ZXing for barcode (green box)
-function startZxing() {
-  if (zxingActive) return;
-  zxingReader = new ZXing.BrowserMultiFormatReader();
-  zxingActive = true;
-  const tick = async () => {
-    if (!zxingActive) return;
-    try {
-      const result = await zxingReader.decodeOnceFromVideoElement(video);
-      if (result && result.text) {
-        currentUPC = result.text.replace(/\D/g, "");
-        // Points are often 2 for 1D; build a bbox
-        const pts = (result.resultPoints || []).map((p) => ({
-          x: p.x,
-          y: p.y,
-        }));
-        if (pts.length >= 2) {
-          const minx = Math.min(...pts.map((p) => p.x)),
-            maxx = Math.max(...pts.map((p) => p.x));
-          const miny = Math.min(...pts.map((p) => p.y)),
-            maxy = Math.max(...pts.map((p) => p.y));
-          bestBarcodeBox = {
-            x: minx - 10,
-            y: miny - 20,
-            w: maxx - minx + 20,
-            h: maxy - miny + 40,
-            conf: 0.9,
-          };
-        }
-      }
-    } catch (_e) {
-      /* try again */
-    }
-    if (zxingActive) setTimeout(tick, 100); // throttled
-  };
-  tick();
-}
-function stopZxing() {
-  try {
-    zxingReader && zxingReader.reset();
-  } catch (_e) {}
-  zxingActive = false;
-  zxingReader = null;
-  currentUPC = null;
-  bestBarcodeBox = null;
-}
-
-// OpenCV.js loop for label (magenta box)
-function loop(ts) {
+async function detectLoop() {
   if (!running) return;
-  if (ts - lastFrameAt > 66) {
-    // ~15fps
-    lastFrameAt = ts;
-    detectLabelBox();
-    drawOverlay();
+  try {
+    const fd = new FormData();
+    fd.append("file", frameToBlob(), "frame.jpg");
+    const res = await fetch("/api/detect", { method: "POST", body: fd });
+    const j = await res.json();
+    bestLabelBox = j.label
+      ? { x: j.label.bbox[0], y: j.label.bbox[1], w: j.label.bbox[2], h: j.label.bbox[3] }
+      : null;
+    if (j.barcode) {
+      bestBarcodeBox = {
+        x: j.barcode.bbox[0],
+        y: j.barcode.bbox[1],
+        w: j.barcode.bbox[2],
+        h: j.barcode.bbox[3],
+        conf: 0.9,
+      };
+      currentUPC = j.barcode.upc || null;
+    } else {
+      bestBarcodeBox = null;
+    }
+  } catch (_e) {
+    /* ignore */
   }
-  requestAnimationFrame(loop);
+  setTimeout(detectLoop, 500);
 }
 
-function detectLabelBox() {
-  if (!window.cv || video.readyState < 2) return;
-  const mat = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-  const cap = new cv.VideoCapture(video);
-  cap.read(mat);
-
-  let gray = new cv.Mat();
-  cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-  let grad = new cv.Mat();
-  let kernel3 = cv.Mat.ones(3, 3, cv.CV_8U);
-  cv.morphologyEx(gray, grad, cv.MORPH_GRADIENT, kernel3);
-  let thr = new cv.Mat();
-  cv.threshold(grad, thr, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
-  let kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 9));
-  let closed = new cv.Mat();
-  cv.morphologyEx(thr, closed, cv.MORPH_CLOSE, kernel);
-
-  let contours = new cv.MatVector();
-  let hierarchy = new cv.Mat();
-  cv.findContours(
-    closed,
-    contours,
-    hierarchy,
-    cv.RETR_EXTERNAL,
-    cv.CHAIN_APPROX_SIMPLE
-  );
-
-  let best = null;
-  let bestScore = 0;
-  for (let i = 0; i < contours.size(); i++) {
-    const c = contours.get(i);
-    const r = cv.boundingRect(c);
-    const area = r.width * r.height;
-    if (area < 0.06 * mat.cols * mat.rows) continue; // skip small
-    const ar = r.width / (r.height + 1e-6);
-    const score =
-      (area / (mat.cols * mat.rows)) * (ar > 0.35 && ar < 1.8 ? 1.0 : 0.6);
-    if (score > bestScore) {
-      bestScore = score;
-      best = r;
-    }
-  }
-  bestLabelBox = best
-    ? { x: best.x, y: best.y, w: best.width, h: best.height, conf: 0.7 }
-    : null;
-
-  [mat, gray, grad, thr, closed, contours, hierarchy, kernel3, kernel].forEach(
-    (m) => {
-      try {
-        m.delete();
-      } catch (_e) {}
-    }
-  );
+function drawLoop() {
+  if (!running) return;
+  drawOverlay();
+  requestAnimationFrame(drawLoop);
 }
 
 function drawOverlay() {
@@ -244,7 +158,16 @@ function text(t, x, y, color) {
   ctx.fillText(t, x + 2, Math.max(14, y));
 }
 
-// Crop current box to Blob
+// Capture helpers
+function frameToBlob() {
+  const c = document.createElement("canvas");
+  c.width = video.videoWidth;
+  c.height = video.videoHeight;
+  const cctx = c.getContext("2d");
+  cctx.drawImage(video, 0, 0, c.width, c.height);
+  return dataURLtoBlob(c.toDataURL("image/jpeg", 0.85));
+}
+
 function cropBoxFromVideo(box) {
   const c = document.createElement("canvas");
   c.width = Math.max(1, box.w);
@@ -253,6 +176,7 @@ function cropBoxFromVideo(box) {
   cctx.drawImage(video, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
   return dataURLtoBlob(c.toDataURL("image/jpeg", 0.9));
 }
+
 function dataURLtoBlob(dataUrl) {
   const bstr = atob(dataUrl.split(",")[1]);
   let n = bstr.length;
@@ -288,3 +212,4 @@ function renderFood(j) {
   nutriEl.textContent = JSON.stringify(j.nutrition || {}, null, 2);
   speak(j.roast);
 }
+
