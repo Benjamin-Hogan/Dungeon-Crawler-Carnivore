@@ -9,25 +9,35 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 # Preload OpenCV's detector; fall back to pyzbar if needed
 barcode_detector = cv2.barcode_BarcodeDetector()
 
-# Lazy download and initialization of EAST text detector for nutrition labels
-EAST_URL = "https://github.com/opencv/opencv_extra/raw/4.5.4/testdata/dnn/east_text_detection.pb"
-EAST_PATH = os.path.join("models", "frozen_east_text_detection.pb")
+# Lazily download and initialize a DB text detector for nutrition labels
+DB_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/text_detection_db/db_resnet50.onnx"
+DB_PATH = os.path.join("models", "db_text_detection.onnx")
 text_detector = None
 
+
 def get_text_detector():
+    """Return a singleton DB text detector, downloading the model if needed."""
     global text_detector
     if text_detector is not None:
         return text_detector
-    if not os.path.exists(EAST_PATH):
-        os.makedirs(os.path.dirname(EAST_PATH), exist_ok=True)
+    if not os.path.exists(DB_PATH):
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         try:
-            urllib.request.urlretrieve(EAST_URL, EAST_PATH)
+            urllib.request.urlretrieve(DB_URL, DB_PATH)
         except Exception:
             return None
     try:
-        td = cv2.dnn_TextDetectionModel(EAST_PATH)
-        td.setInputParams(scale=1.0, size=(320, 320),
-                          mean=(123.68, 116.78, 103.94), swapRB=True)
+        td = cv2.dnn_TextDetectionModel_DB(DB_PATH)
+        td.setBinaryThreshold(0.3)
+        td.setPolygonThreshold(0.5)
+        td.setUnclipRatio(1.7)
+        td.setInputParams(
+            scale=1.0 / 255,
+            size=(736, 736),
+            mean=(122.67891434, 116.66876762, 104.00698793),
+            swapRB=True,
+            crop=False,
+        )
         text_detector = td
     except Exception:
         text_detector = None
@@ -35,61 +45,81 @@ def get_text_detector():
 
 
 def detect_barcode(bgr):
-    """Return {bbox:[x,y,w,h], upc:str?} or None."""
-    # OpenCV's native detector (fast, but sometimes flaky)
+    """Detect a UPC/EAN barcode returning {bbox:[x,y,w,h], upc:str?, conf:float}."""
+
+    # 1) Try OpenCV's built-in detector
     try:
         ok, decoded, _, pts = barcode_detector.detectAndDecode(bgr)
         if ok and pts is not None and len(pts):
             pts = pts[0].reshape(-1, 2)
             x, y, bw, bh = cv2.boundingRect(pts.astype(np.float32))
             code = re.sub(r"\D", "", decoded[0] if decoded else "")
-            return {"bbox": [int(x), int(y), int(bw), int(bh)], "upc": code or None}
+            return {"bbox": [int(x), int(y), int(bw), int(bh)], "upc": code or None, "conf": 0.9}
     except Exception:
         pass
 
-    # Fallback to zbar which is slower but more forgiving
+    # 2) Morphological fallback to locate vertical bar patterns
+    try:
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        grad = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=-1)
+        grad = cv2.convertScaleAbs(grad)
+        grad = cv2.morphologyEx(grad, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)))
+        _, bw = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (21, 7)))
+        cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if cnts:
+            c = max(cnts, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(c)
+            if w > h * 2 and w * h > 1000:
+                roi = bgr[y:y + h, x:x + w]
+                code = decode_upc(roi)
+                return {"bbox": [int(x), int(y), int(w), int(h)], "upc": code, "conf": 0.6}
+    except Exception:
+        pass
+
+    # 3) Fallback to zbar which is slower but more forgiving
     try:
         pil = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         for obj in zbar_decode(pil):
             x, y, w, h = obj.rect
             code = re.sub(r"\D", "", (obj.data or b"").decode("utf-8", errors="ignore"))
-            return {"bbox": [int(x), int(y), int(w), int(h)], "upc": code or None}
+            return {"bbox": [int(x), int(y), int(w), int(h)], "upc": code or None, "conf": 0.5}
     except Exception:
         pass
     return None
 
 
 def detect_nutrition_label(bgr):
-    """Use EAST text detector to find the largest text block."""
+    """Use a DB text detector to find dense text clusters."""
     td = get_text_detector()
     if td is None:
         return None
     try:
-        boxes, confs = td.detect(bgr)
+        polys, confs = td.detect(bgr)
     except Exception:
         return None
-    if boxes is None or len(boxes) == 0:
+    if polys is None or len(polys) == 0:
         return None
 
     h, w = bgr.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
-    for (box, conf) in zip(boxes, confs):
+    for (poly, conf) in zip(polys, confs):
         if conf < 0.5:
             continue
-        x, y, bw, bh = map(int, box)
-        cv2.rectangle(mask, (x, y), (x + bw, y + bh), 255, -1)
+        pts = np.array(poly, dtype=np.int32).reshape((-1, 2))
+        cv2.fillPoly(mask, [pts], 255)
     if cv2.countNonZero(mask) == 0:
         return None
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
-    mask = cv2.dilate(mask, kernel, iterations=1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35))
+    mask = cv2.dilate(mask, kernel, iterations=2)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return None
     x, y, bw, bh = cv2.boundingRect(max(cnts, key=cv2.contourArea))
     if bw * bh < 0.02 * h * w:
         return None
-    return (x, y, bw, bh)
+    return {"bbox": [int(x), int(y), int(bw), int(bh)], "conf": 0.7}
 
 # ---------- ROUTES ----------
 
@@ -126,12 +156,9 @@ def detect_frame():
 
     label = None
     try:
-        lb = detect_nutrition_label(bgr)
-        if lb:
-            x, y, lw, lh = lb
-            label = {"bbox": [int(x), int(y), int(lw), int(lh)]}
+        label = detect_nutrition_label(bgr)
     except Exception:
-        pass
+        label = None
 
     return jsonify({"barcode": barcode, "label": label})
 

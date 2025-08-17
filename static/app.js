@@ -108,7 +108,13 @@ async function detectLoop() {
     const res = await fetch("/api/detect", { method: "POST", body: fd });
     const j = await res.json();
     bestLabelBox = j.label
-      ? { x: j.label.bbox[0], y: j.label.bbox[1], w: j.label.bbox[2], h: j.label.bbox[3] }
+      ? {
+          x: j.label.bbox[0],
+          y: j.label.bbox[1],
+          w: j.label.bbox[2],
+          h: j.label.bbox[3],
+          conf: j.label.conf || 0.5,
+        }
       : null;
     if (j.barcode) {
       bestBarcodeBox = {
@@ -116,7 +122,7 @@ async function detectLoop() {
         y: j.barcode.bbox[1],
         w: j.barcode.bbox[2],
         h: j.barcode.bbox[3],
-        conf: 0.9,
+        conf: j.barcode.conf || 0.5,
       };
       currentUPC = j.barcode.upc || null;
     } else {
@@ -126,7 +132,7 @@ async function detectLoop() {
     /* ignore */
   }
   // run detection frequently for smoother boxes
-  setTimeout(detectLoop, 300);
+  setTimeout(detectLoop, 150);
 }
 
 function drawLoop() {
