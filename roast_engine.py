@@ -81,7 +81,8 @@ class RoastEngine:
         ])
         lines = [opener]
         for tag in tags:
-            lines.append(random.choice(cls.ROASTS.get(tag, ["Mysterious morsel detected."])))
+            lines.append(random.choice(cls.ROASTS.get(
+                tag, ["Mysterious morsel detected."])))
         closer = random.choice([
             "Cart debuff applied.",
             "Proceed, brave shopper.",
