@@ -1,10 +1,18 @@
 from flask import Flask, request, jsonify
 from roast_engine import RoastEngine
-import io, re, cv2, json, numpy as np, pytesseract, requests
+import io, re, os, cv2, json, numpy as np, pytesseract, requests
 from PIL import Image
 from pyzbar.pyzbar import decode as zbar_decode
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+
+# preload detectors: OpenCV barcode and EAST text model for nutrition labels
+barcode_detector = cv2.barcode_BarcodeDetector()
+east_path = os.path.join(os.path.dirname(__file__), "models", "frozen_east_text_detection.pb")
+text_detector = cv2.dnn_TextDetectionModel(east_path)
+text_detector.setConfidenceThreshold(0.5)
+text_detector.setNMSThreshold(0.4)
+text_detector.setInputParams(scale=1.0, size=(320, 320), mean=(123.68, 116.78, 103.94), swapRB=True, crop=False)
 
 # ---------- ROUTES ----------
 
@@ -28,6 +36,7 @@ def roast_by_upc():
     return jsonify(food)
 
 # Client sends a full video frame; we detect barcode + nutrition label
+
 @app.route("/api/detect", methods=["POST"])
 def detect_frame():
     f = request.files.get("file")
@@ -36,11 +45,9 @@ def detect_frame():
     pil = Image.open(io.BytesIO(f.read())).convert("RGB")
     bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
-    h, w = bgr.shape[:2]
     barcode = None
     try:
-        bd = cv2.barcode_BarcodeDetector()
-        ok, decoded, _, pts = bd.detectAndDecode(bgr)
+        ok, decoded, _, pts = barcode_detector.detectAndDecode(bgr)
         if ok and pts is not None and len(pts):
             pts = pts[0].reshape(-1, 2)
             x, y, bw, bh = cv2.boundingRect(pts.astype(np.float32))
@@ -49,25 +56,18 @@ def detect_frame():
     except Exception:
         pass
 
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
-    thr = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-    closed = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (15, 9)))
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     label = None
-    best_score = 0.0
-    for c in contours:
-        x, y, lw, lh = cv2.boundingRect(c)
-        area = lw * lh
-        if area < 0.06 * w * h:
-            continue
-        ar = lw / (lh + 1e-6)
-        score = (area / (w * h)) * (1.0 if 0.35 < ar < 1.8 else 0.6)
-        if score > best_score:
-            best_score = score
+    try:
+        boxes, confs = text_detector.detect(bgr)
+        if len(boxes):
+            rects = [cv2.boundingRect(b.astype(np.int32)) for b in boxes]
+            x, y, lw, lh = max(rects, key=lambda r: r[2] * r[3])
             label = {"bbox": [int(x), int(y), int(lw), int(lh)]}
+    except Exception:
+        pass
 
     return jsonify({"barcode": barcode, "label": label})
+
 
 # Browser uploads a cropped ROI (label or barcode frame)
 @app.route("/api/analyze", methods=["POST"])
