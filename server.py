@@ -1,4 +1,5 @@
 import numpy as np
+from nutrition.nutrition_extractor.detection import Detector
 import cv2
 from flask import Flask, request, jsonify
 from roast_engine import RoastEngine
@@ -21,6 +22,8 @@ barcode_detector = cv2.barcode_BarcodeDetector()
 DB_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/text_detection_db/db_resnet50.onnx"
 DB_PATH = os.path.join("models", "db_text_detection.onnx")
 text_detector = None
+
+external_detector = None
 
 
 def get_text_detector():
@@ -50,6 +53,16 @@ def get_text_detector():
     except Exception:
         text_detector = None
     return text_detector
+
+
+def get_external_detector():
+    global external_detector
+    if external_detector is None:
+        try:
+            external_detector = Detector()
+        except Exception:
+            external_detector = None
+    return external_detector
 
 
 def detect_barcode(bgr):
@@ -441,39 +454,22 @@ def normalize_for_roast(food):
     }
 
 
-# === Simple object detection wrapper ===
-
+# === External object detection wrapper ===
 @app.route("/detect", methods=["POST"])
 def detect():
     file = request.files.get("image")
     if not file:
         return jsonify({"error": "No image uploaded"}), 400
     img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
-
-    detections = []
-
-    bc = detect_barcode(img)
-    if bc:
-        x, y, w, h = bc["bbox"]
-        detections.append({"bbox": [x, y, x + w, y + h],
-                           "score": bc.get("conf", 0.0),
-                           "class": "barcode"})
-
-    lb = None
-    try:
-        lb = detect_nutrition_label(img)
-    except Exception:
-        lb = None
-    if lb:
-        x, y, w, h = lb["bbox"]
-        detections.append({"bbox": [x, y, x + w, y + h],
-                           "score": lb.get("conf", 0.0),
-                           "class": "label"})
-
-    boxes = [d["bbox"] for d in detections]
-    scores = [d["score"] for d in detections]
-    classes = [d["class"] for d in detections]
-    return jsonify({"boxes": boxes, "scores": scores, "classes": classes})
+    det = get_external_detector()
+    if det is None:
+        return jsonify({"error": "Detector unavailable"}), 500
+    boxes, scores, classes = det.detect(img)
+    return jsonify({
+        "boxes": boxes.tolist(),
+        "scores": scores.tolist(),
+        "classes": classes.tolist(),
+    })
 # === End object detection wrapper ===
 
 
