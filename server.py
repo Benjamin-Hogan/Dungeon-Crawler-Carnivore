@@ -187,10 +187,28 @@ def detect_frame():
     barcode = detect_barcode(bgr)
 
     label = None
-    try:
-        label = detect_nutrition_label(bgr)
-    except Exception:
-        label = None
+    det = get_external_detector()
+    if det is not None:
+        try:
+            boxes, scores, classes = det.detect(bgr)
+            if len(scores):
+                score = float(scores[0])
+                if score >= 0.5:
+                    y1, x1, y2, x2 = boxes[0]
+                    h, w = bgr.shape[:2]
+                    x = int(x1 * w)
+                    y = int(y1 * h)
+                    bw = int((x2 - x1) * w)
+                    bh = int((y2 - y1) * h)
+                    label = {"bbox": [x, y, bw, bh], "conf": score}
+        except Exception:
+            label = None
+
+    if label is None:
+        try:
+            label = detect_nutrition_label(bgr)
+        except Exception:
+            label = None
 
     return jsonify({"barcode": barcode, "label": label})
 
@@ -452,25 +470,6 @@ def normalize_for_roast(food):
         "fiber_g": pick("fiber_g") or 0,
         "ingredients_count":  len([w for w in (food.get("ingredients_text") or "").split(",") if w.strip()])
     }
-
-
-# === External object detection wrapper ===
-@app.route("/detect", methods=["POST"])
-def detect():
-    file = request.files.get("image")
-    if not file:
-        return jsonify({"error": "No image uploaded"}), 400
-    img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
-    det = get_external_detector()
-    if det is None:
-        return jsonify({"error": "Detector unavailable"}), 500
-    boxes, scores, classes = det.detect(img)
-    return jsonify({
-        "boxes": boxes.tolist(),
-        "scores": scores.tolist(),
-        "classes": classes.tolist(),
-    })
-# === End object detection wrapper ===
 
 
 if __name__ == "__main__":

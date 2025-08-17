@@ -132,7 +132,7 @@ async function detectLoop() {
     /* ignore */
   }
   // run detection frequently for smoother boxes
-  setTimeout(detectLoop, 150);
+  if (running) setTimeout(detectLoop, 150);
 }
 
 function drawLoop() {
