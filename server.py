@@ -6,31 +6,60 @@ from pyzbar.pyzbar import decode as zbar_decode
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
-# preload barcode detector (nutrition label detection uses contour heuristics)
+# Preload OpenCV's detector; fall back to pyzbar if needed
 barcode_detector = cv2.barcode_BarcodeDetector()
 
 
+def detect_barcode(bgr):
+    """Return {bbox:[x,y,w,h], upc:str?} or None."""
+    # OpenCV's native detector (fast, but sometimes flaky)
+    try:
+        ok, decoded, _, pts = barcode_detector.detectAndDecode(bgr)
+        if ok and pts is not None and len(pts):
+            pts = pts[0].reshape(-1, 2)
+            x, y, bw, bh = cv2.boundingRect(pts.astype(np.float32))
+            code = re.sub(r"\D", "", decoded[0] if decoded else "")
+            return {"bbox": [int(x), int(y), int(bw), int(bh)], "upc": code or None}
+    except Exception:
+        pass
+
+    # Fallback to zbar which is slower but more forgiving
+    try:
+        pil = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        for obj in zbar_decode(pil):
+            x, y, w, h = obj.rect
+            code = re.sub(r"\D", "", (obj.data or b"").decode("utf-8", errors="ignore"))
+            return {"bbox": [int(x), int(y), int(w), int(h)], "upc": code or None}
+    except Exception:
+        pass
+    return None
+
+
 def detect_nutrition_label(bgr):
-    """Return bounding box [x,y,w,h] of a likely nutrition label or None."""
+    """Locate table-like regions likely to be nutrition facts."""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    # high contrast text blocks -> white, background -> black
-    thresh = cv2.adaptiveThreshold(
-        blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 4
-    )
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-    cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    gray = cv2.bilateralFilter(gray, 9, 75, 75)
+    bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                               cv2.THRESH_BINARY_INV, 15, 4)
+
+    # Inspired by OFF extractor: look for strong vertical & horizontal lines
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(1, bgr.shape[0] // 30)))
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(1, bgr.shape[1] // 30), 1))
+    vert = cv2.morphologyEx(bw, cv2.MORPH_OPEN, v_kernel, iterations=1)
+    horiz = cv2.morphologyEx(bw, cv2.MORPH_OPEN, h_kernel, iterations=1)
+    table = cv2.addWeighted(vert, 0.5, horiz, 0.5, 0)
+
+    cnts, _ = cv2.findContours(table, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     h, w = gray.shape[:2]
-    candidates = []
+    boxes = []
     for c in cnts:
         x, y, cw, ch = cv2.boundingRect(c)
         area = cw * ch
         aspect = ch / float(cw + 1e-5)
-        if area > 0.02 * h * w and area < 0.9 * h * w and 1.0 < aspect < 6.0:
-            candidates.append((area, (x, y, cw, ch)))
-    if candidates:
-        return max(candidates, key=lambda t: t[0])[1]
+        if area > 0.015 * h * w and 0.5 < aspect < 8.0:
+            boxes.append((area, (x, y, cw, ch)))
+    if boxes:
+        return max(boxes, key=lambda t: t[0])[1]
     return None
 
 # ---------- ROUTES ----------
@@ -64,16 +93,7 @@ def detect_frame():
     pil = Image.open(io.BytesIO(f.read())).convert("RGB")
     bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
-    barcode = None
-    try:
-        ok, decoded, _, pts = barcode_detector.detectAndDecode(bgr)
-        if ok and pts is not None and len(pts):
-            pts = pts[0].reshape(-1, 2)
-            x, y, bw, bh = cv2.boundingRect(pts.astype(np.float32))
-            code = re.sub(r"\D", "", decoded[0] if decoded else "")
-            barcode = {"bbox": [int(x), int(y), int(bw), int(bh)], "upc": code or None}
-    except Exception:
-        pass
+    barcode = detect_barcode(bgr)
 
     label = None
     try:

@@ -125,7 +125,8 @@ async function detectLoop() {
   } catch (_e) {
     /* ignore */
   }
-  setTimeout(detectLoop, 500);
+  // run detection frequently for smoother boxes
+  setTimeout(detectLoop, 300);
 }
 
 function drawLoop() {
