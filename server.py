@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from roast_engine import RoastEngine
-import io, re, cv2, json, numpy as np, pytesseract, requests
+import io, re, cv2, json, numpy as np, pytesseract, requests, os, urllib.request
 from PIL import Image
 from pyzbar.pyzbar import decode as zbar_decode
 
@@ -8,6 +8,30 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 
 # Preload OpenCV's detector; fall back to pyzbar if needed
 barcode_detector = cv2.barcode_BarcodeDetector()
+
+# Lazy download and initialization of EAST text detector for nutrition labels
+EAST_URL = "https://github.com/opencv/opencv_extra/raw/4.5.4/testdata/dnn/east_text_detection.pb"
+EAST_PATH = os.path.join("models", "frozen_east_text_detection.pb")
+text_detector = None
+
+def get_text_detector():
+    global text_detector
+    if text_detector is not None:
+        return text_detector
+    if not os.path.exists(EAST_PATH):
+        os.makedirs(os.path.dirname(EAST_PATH), exist_ok=True)
+        try:
+            urllib.request.urlretrieve(EAST_URL, EAST_PATH)
+        except Exception:
+            return None
+    try:
+        td = cv2.dnn_TextDetectionModel(EAST_PATH)
+        td.setInputParams(scale=1.0, size=(320, 320),
+                          mean=(123.68, 116.78, 103.94), swapRB=True)
+        text_detector = td
+    except Exception:
+        text_detector = None
+    return text_detector
 
 
 def detect_barcode(bgr):
@@ -36,31 +60,36 @@ def detect_barcode(bgr):
 
 
 def detect_nutrition_label(bgr):
-    """Locate table-like regions likely to be nutrition facts."""
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 9, 75, 75)
-    bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                               cv2.THRESH_BINARY_INV, 15, 4)
+    """Use EAST text detector to find the largest text block."""
+    td = get_text_detector()
+    if td is None:
+        return None
+    try:
+        boxes, confs = td.detect(bgr)
+    except Exception:
+        return None
+    if boxes is None or len(boxes) == 0:
+        return None
 
-    # Inspired by OFF extractor: look for strong vertical & horizontal lines
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(1, bgr.shape[0] // 30)))
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(1, bgr.shape[1] // 30), 1))
-    vert = cv2.morphologyEx(bw, cv2.MORPH_OPEN, v_kernel, iterations=1)
-    horiz = cv2.morphologyEx(bw, cv2.MORPH_OPEN, h_kernel, iterations=1)
-    table = cv2.addWeighted(vert, 0.5, horiz, 0.5, 0)
+    h, w = bgr.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for (box, conf) in zip(boxes, confs):
+        if conf < 0.5:
+            continue
+        x, y, bw, bh = map(int, box)
+        cv2.rectangle(mask, (x, y), (x + bw, y + bh), 255, -1)
+    if cv2.countNonZero(mask) == 0:
+        return None
 
-    cnts, _ = cv2.findContours(table, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    h, w = gray.shape[:2]
-    boxes = []
-    for c in cnts:
-        x, y, cw, ch = cv2.boundingRect(c)
-        area = cw * ch
-        aspect = ch / float(cw + 1e-5)
-        if area > 0.015 * h * w and 0.5 < aspect < 8.0:
-            boxes.append((area, (x, y, cw, ch)))
-    if boxes:
-        return max(boxes, key=lambda t: t[0])[1]
-    return None
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    x, y, bw, bh = cv2.boundingRect(max(cnts, key=cv2.contourArea))
+    if bw * bh < 0.02 * h * w:
+        return None
+    return (x, y, bw, bh)
 
 # ---------- ROUTES ----------
 

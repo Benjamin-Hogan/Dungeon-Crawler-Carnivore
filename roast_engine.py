@@ -55,10 +55,11 @@ class RoastEngine:
         ],
     }
 
-    def tags_from_nutrition(self, nutrition: Dict[str, float]) -> List[str]:
+    @classmethod
+    def tags_from_nutrition(cls, nutrition: Dict[str, float]) -> List[str]:
         """Return a list of tags whose rules match the given nutrition data."""
         tags: List[str] = []
-        for name, expr in self.RULES:
+        for name, expr in cls.RULES:
             try:
                 if eval(expr, {}, {"n": nutrition}):
                     tags.append(name)
@@ -67,10 +68,9 @@ class RoastEngine:
                 continue
         return tags
 
-    def roast(self, nutrition: Dict[str, float]) -> str:
-        """Generate a combined roast string for the given nutrition profile."""
-        tags = self.tags_from_nutrition(nutrition)
-        # If no tag applies, default to virtuous; otherwise leave tags unchanged
+    @classmethod
+    def choose_roast(cls, tags: List[str], product_name: str = "") -> str:
+        """Pick snarky lines based on the provided tag list."""
         if not tags:
             tags = ["virtuous"]
 
@@ -81,12 +81,15 @@ class RoastEngine:
         ])
         lines = [opener]
         for tag in tags:
-            lines.append(random.choice(self.ROASTS.get(
-                tag, ["Mysterious morsel detected."])))
+            lines.append(random.choice(cls.ROASTS.get(tag, ["Mysterious morsel detected."])))
         closer = random.choice([
             "Cart debuff applied.",
             "Proceed, brave shopper.",
             "Confess your crimes at self‑checkout.",
         ])
         lines.append(closer)
-        return " " .join(lines)
+        return " ".join(lines)
+
+    def roast(self, nutrition: Dict[str, float]) -> str:
+        """Generate a combined roast string for the given nutrition profile."""
+        return self.choose_roast(self.tags_from_nutrition(nutrition))
