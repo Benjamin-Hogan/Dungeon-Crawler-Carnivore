@@ -1,14 +1,11 @@
 import numpy as np
-import cv2
 from nutrition.nutrition_extractor.detection import Detector
-from flask import request, jsonify
+import cv2
 from flask import Flask, request, jsonify
 from roast_engine import RoastEngine
 import io
 import re
-import cv2
 import json
-import numpy as np
 import pytesseract
 import requests
 import os
@@ -25,6 +22,8 @@ barcode_detector = cv2.barcode_BarcodeDetector()
 DB_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/text_detection_db/db_resnet50.onnx"
 DB_PATH = os.path.join("models", "db_text_detection.onnx")
 text_detector = None
+
+external_detector = None
 
 
 def get_text_detector():
@@ -54,6 +53,16 @@ def get_text_detector():
     except Exception:
         text_detector = None
     return text_detector
+
+
+def get_external_detector():
+    global external_detector
+    if external_detector is None:
+        try:
+            external_detector = Detector()
+        except Exception:
+            external_detector = None
+    return external_detector
 
 
 def detect_barcode(bgr):
@@ -445,27 +454,23 @@ def normalize_for_roast(food):
     }
 
 
-# === Nutrition Detection Retrofit ===
-
-MODEL_PATH = "dungeon_web/nutrition/frozen_inference_graph.pb"
-LABEL_PATH = "dungeon_web/nutrition/nutrition.pbtxt"
-
-detector = Detector(MODEL_PATH, LABEL_PATH)
-
-
+# === External object detection wrapper ===
 @app.route("/detect", methods=["POST"])
 def detect():
     file = request.files.get("image")
     if not file:
         return jsonify({"error": "No image uploaded"}), 400
     img = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
-    boxes, scores, classes = detector.detect(img)
+    det = get_external_detector()
+    if det is None:
+        return jsonify({"error": "Detector unavailable"}), 500
+    boxes, scores, classes = det.detect(img)
     return jsonify({
         "boxes": boxes.tolist(),
         "scores": scores.tolist(),
-        "classes": classes.tolist()
+        "classes": classes.tolist(),
     })
-# === End Retrofit ===
+# === End object detection wrapper ===
 
 
 if __name__ == "__main__":
